@@ -12,3 +12,4 @@ from .video2audio import Video2Audio
 from .multi_images_to_video import MultiImages2Video
 from .text2audio import Text2Audio
 from .multi_elements_edit import MultiModelVideoEdit
+from .omni_video import OmniVideo

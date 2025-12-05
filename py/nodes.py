@@ -1,6 +1,6 @@
 from .api import Client, ImageGenerator, ImageExpander, Image2Video, Video2Audio, Text2Audio, \
     Text2Video, CameraControl, CameraControlConfig, KolorsVurtualTryOn, VideoExtend, LipSync, LipSyncInput, EffectInput, \
-    Effects, MultiImages2Video
+    Effects, MultiImages2Video, OmniVideo
 import base64
 import io
 import os
@@ -9,6 +9,7 @@ import numpy
 import PIL
 import requests
 import torch
+import mimetypes
 from collections.abc import Iterable
 import configparser
 import folder_paths
@@ -17,6 +18,7 @@ from folder_paths import get_temp_directory
 import time
 import urllib.parse
 from pathlib import Path
+import hashlib
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
@@ -108,6 +110,40 @@ def _load_audio_from_url(audio_url, save_directory, filename_prefix="audio"):
         raise Exception(f"save failed: {e}")
     except Exception as e:
         raise Exception(f"other failed: {e}")
+
+
+def _upload_file(file_path, upload_url=None):
+    """上传文件到服务器"""
+    # 如果没有提供上传地址，尝试从配置文件读取
+    if upload_url is None:
+        try:
+            upload_url = config['API'].get('UPLOAD_SERVER_URL', 'http://10.1.5.65:8509/upload')
+            if not upload_url or upload_url.strip() == '':
+                upload_url = 'http://10.1.5.65:8509/upload'
+        except:
+            upload_url = 'http://10.1.5.65:8509/upload'
+    
+    try:
+        print(f"上传地址: {upload_url}")
+        with open(file_path, 'rb') as f:
+            files = {'file': f}
+            response = requests.post(upload_url, files=files)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('success'):
+                print(f"上传成功！")
+                print(f"文件URL: {result['url']}")
+                return result['url']
+            else:
+                print(f"上传失败: {result.get('detail')}")
+        else:
+            print(f"请求失败: {response.status_code}")
+            print(f"错误信息: {response.text}")
+    except Exception as e:
+        print(f"上传异常: {str(e)}")
+    
+    return None
 
 
 class KLingAIAPIClient:
@@ -440,7 +476,6 @@ class Image2VideoNode:
 
         return ('', '')
 
-
 class Text2VideoNode:
     @classmethod
     def INPUT_TYPES(s):
@@ -540,6 +575,220 @@ class Text2VideoNode:
 
         return ('', '')
 
+
+class Text2VideoO1Node:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "client": ("KLING_AI_API_CLIENT",),
+                "model": (["kling-video-o1"],),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": {
+                "aspect_ratio": (["16:9", "9:16", "1:1"],),
+                "duration": (["5", "10"],),
+                # "mode": (["pro"],), # 暂时只有pro
+                # "element_id": ("STRING", {"multiline": False, "default": ""}), # TODO: 支持多个element
+                # "external_task_id": ("STRING", {"multiline": False, "default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("url", "video_id")
+
+    FUNCTION = "generate"
+
+    OUTPUT_NODE = False
+
+    CATEGORY = "KLingAI"
+
+    def generate(self,
+                 client,
+                 model,
+                 prompt,
+                 aspect_ratio="16:9",
+                 duration="5"):
+
+        generator = OmniVideo()
+        generator.model_name = model
+        generator.prompt = prompt
+        generator.aspect_ratio = aspect_ratio
+        generator.duration = duration
+        generator.mode = "pro"
+
+        response = generator.run(client)
+
+        for video_info in response.task_result.videos:
+            print(f'KLing API output video id: {video_info.id}, url: {video_info.url}')
+            return (video_info.url, video_info.id)
+
+        return ('', '')
+
+
+class Image2VideoO1Node:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "client": ("KLING_AI_API_CLIENT",),
+                "model": (["kling-video-o1"],),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+            },
+            "optional": { 
+                "ref_image_1": ("IMAGE",),
+                "ref_image_2": ("IMAGE",),
+                "ref_image_3": ("IMAGE",),
+                "ref_image_4": ("IMAGE",),
+                "ref_image_5": ("IMAGE",),
+                "ref_image_6": ("IMAGE",),
+                "ref_image_7": ("IMAGE",),
+                "ref_image_type": (["first_end_frames", "image_reference"],),
+                "ref_video": ("STRING", {"multiline": False, "default": ""}),
+                "ref_video_type": (["base", "feature"],),
+                "keep_original_sound": (["yes", "no"],),
+                "aspect_ratio": (["16:9", "9:16", "1:1"],),
+                "duration": (["5", "10"],),
+                "mode": (["pro"],),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("url", "video_id")
+
+    FUNCTION = "generate"
+
+    OUTPUT_NODE = False
+
+    CATEGORY = "KLingAI"
+
+    def generate(self,
+                 client,
+                 model,
+                 prompt,
+                 ref_image_1=None,
+                 ref_image_2=None,
+                 ref_image_3=None,
+                 ref_image_4=None,
+                 ref_image_5=None,
+                 ref_image_6=None,
+                 ref_image_7=None,
+                 ref_image_type="first_end_frames",
+                 ref_video=None,
+                 ref_video_type="base",
+                 keep_original_sound="yes",
+                 aspect_ratio=None,
+                 duration="5",
+                 mode="pro"):
+
+        generator = OmniVideo()
+        generator.model_name = model
+        generator.prompt = prompt
+        generator.duration = duration
+        generator.mode = mode
+
+        # 处理 video_list
+        video_list = []
+        if ref_video and ref_video.strip(): 
+            video_item = {
+                "video_url": ref_video,
+                "refer_type": ref_video_type,
+                "keep_original_sound": keep_original_sound
+            }
+            video_list.append(video_item)
+
+        # 判断是否是 base video 模式 (此时不能有首尾帧定义)
+        is_base_video_mode = False
+        if video_list and video_list[0].get("refer_type") == "base":
+            is_base_video_mode = True
+
+        # 处理 image_list
+        image_list = []
+
+        def process_image(img_tensor, frame_type=None):
+            if img_tensor is None:
+                return
+
+            img_item = {}
+            img_base64 = _image_to_base64(img_tensor)
+            img_item["image_url"] = img_base64
+                
+            # 只有在 ref_image_type 为 first_end_frames 且不是 base video 模式时，才添加 type
+            if frame_type and ref_image_type == "first_end_frames" and not is_base_video_mode:
+                img_item["type"] = frame_type
+                
+            image_list.append(img_item)
+
+        # 收集所有非空的参考图
+        ref_images = [ref_image_1, ref_image_2, ref_image_3, ref_image_4, 
+                     ref_image_5, ref_image_6, ref_image_7]
+        ref_images = [img for img in ref_images if img is not None]
+        
+        # 根据 ref_image_type 处理图片
+        if ref_image_type == "first_end_frames" and len(ref_images) >= 2:
+            # 第一张作为首帧
+            process_image(ref_images[0], "first_frame")
+            # 最后一张作为尾帧
+            process_image(ref_images[-1], "end_frame")
+            # 中间的图片作为普通参考图
+            for ref_img in ref_images[1:-1]:
+                process_image(ref_img, None)
+        elif ref_image_type == "first_end_frames" and len(ref_images) == 1:
+            # 只有一张图时，作为首帧
+            process_image(ref_images[0], "first_frame")
+        else:
+            # image_reference 模式：所有图片都作为普通参考图
+            for ref_img in ref_images:
+                process_image(ref_img, None)
+
+        # 再次检查约束 (为了更好的体验，可以在这里修正 image_list)
+        # 1. 数组中超过2张图片时，不支持设置尾帧
+        if len(image_list) > 2:
+             # 移除所有 end_frame 标记?
+             for item in image_list:
+                 if item.get("type") == "end_frame":
+                     del item["type"] # 降级为普通参考图
+        
+        # 2. base video 模式不能有 first/end frame
+        if is_base_video_mode:
+            for item in image_list:
+                if "type" in item:
+                    del item["type"]
+
+        # 3. 尾帧必须有首帧 (已有检查: image_tail usually implies image presence check, but logic above handles generic add)
+        # 如果有 end_frame 但没有 first_frame，是否降级?
+        has_first = any(item.get("type") == "first_frame" for item in image_list)
+        for item in image_list:
+             if item.get("type") == "end_frame" and not has_first:
+                 del item["type"]
+        
+        # 4. 数量限制检查 (仅打印警告，不强制截断，让 API 反馈)
+        total_refs = len(image_list)
+        if video_list:
+            if total_refs > 4:
+                print(f"WARNING: With video_list, (images) count is {total_refs}, which exceeds limit of 4.")
+        else:
+            if total_refs > 7:
+                print(f"WARNING: Without video_list, (images) count is {total_refs}, which exceeds limit of 7.")
+
+        generator.image_list = image_list
+        generator.video_list = video_list
+        
+        # 如果没有首帧且没有视频，aspect_ratio 必填
+        # 实际上 API 要求 aspect_ratio 用于无首帧情况
+        # 有首帧时 aspect_ratio 可能被忽略或需一致
+        if not has_first and aspect_ratio is None:
+             aspect_ratio = "16:9"
+        
+        generator.aspect_ratio = aspect_ratio
+
+        response = generator.run(client)
+
+        for video_info in response.task_result.videos:
+            print(f'KLing API output video id: {video_info.id}, url: {video_info.url}')
+            return (video_info.url, video_info.id)
+
+        return ('', '')
 
 class KolorsVirtualTryOnNode:
     @classmethod
@@ -1168,3 +1417,65 @@ class TextToAudioNode:
         print(f"成功提取：audio_id={audio_id}, url_mp3={url_mp3}")
 
         return (audio_id, url_mp3)
+
+
+class UploadVideoNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        input_dir = folder_paths.get_input_directory()
+        files = []
+        if os.path.exists(input_dir):
+            files = [f for f in os.listdir(input_dir) 
+                    if os.path.isfile(os.path.join(input_dir, f)) 
+                    and f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm'))]
+        return {
+            "required": {
+                "video": (sorted(files), {"video_upload": True}),
+            },
+            "optional": {
+                "upload_url": ("STRING", {
+                    "multiline": False, 
+                    "default": "",
+                    "placeholder": "留空则使用配置文件中的地址"
+                }),
+            }
+        }
+
+    CATEGORY = "KLingAI"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("video_url",)
+    FUNCTION = "upload_video"
+
+    def upload_video(self, video, upload_url=""):
+        video_path = folder_paths.get_annotated_filepath(video)
+        
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"视频文件不存在: {video_path}")
+        
+        print(f"正在上传视频: {video_path}")
+        
+        # 如果用户提供了上传地址，使用用户提供的；否则使用配置文件或默认值
+        url_to_use = upload_url.strip() if upload_url and upload_url.strip() else None
+        video_url = _upload_file(video_path, url_to_use)
+        
+        if video_url is None:
+            raise Exception("视频上传失败")
+        
+        print(f"视频上传成功，URL: {video_url}")
+        return (video_url,)
+
+    @classmethod
+    def IS_CHANGED(cls, video, upload_url=""):
+        video_path = folder_paths.get_annotated_filepath(video)
+        if os.path.exists(video_path):
+            m = hashlib.sha256()
+            with open(video_path, 'rb') as f:
+                m.update(f.read())
+            return m.digest().hex()
+        return ""
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, video, upload_url=""):
+        if not folder_paths.exists_annotated_filepath(video):
+            return "Invalid video file: {}".format(video)
+        return True
